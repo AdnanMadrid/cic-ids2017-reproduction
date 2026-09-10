@@ -1,0 +1,444 @@
+% =====================================================================
+%  Reproducing the CIC-IDS2017 Thursday-Morning Web-Attack Scenario
+%  in an Airbus CyberRange Testbed
+%
+%  Self-contained Overleaf document. Requires: booktabs, listings,
+%  xcolor, hyperref, geometry (all standard on Overleaf).
+% =====================================================================
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\lstset{basicstyle=\ttfamily\footnotesize,breaklines=true,frame=single,
+        backgroundcolor=\color{gray!8},columns=fullflexible,keepspaces=true}
+
+\title{Reproducing the CIC-IDS2017 Thursday-Morning Web-Attack Scenario\\in an Airbus CyberRange Testbed}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We reproduce the Thursday-morning ``Web Attacks'' scenario of the widely used
+CIC-IDS2017 intrusion-detection dataset~\cite{sharafaldin2018} inside an Airbus
+CyberRange environment. Our objective was to follow the original methodology as
+closely as the environment allowed---identical victim addressing, the same three
+web attacks (Brute Force, XSS, SQL Injection), a benign background profile, and a
+mirror-port capture---and to produce a labelled, flow-based dataset in the same
+feature format. This document details the complete network topology and its IP
+plan, the software installed on each host, the scripts used to generate and
+capture traffic, and a thorough comparison of the resulting dataset against the
+original CIC file, including a clear discussion of where our dataset matches the
+reference and where (and why) it necessarily differs.
+\end{abstract}
+
+% =====================================================================
+\section{Introduction}
+Intrusion-detection research depends on realistic, labelled network datasets.
+CIC-IDS2017 is one of the most widely adopted such datasets; its Thursday-morning
+segment contains three application-layer web attacks executed against a
+vulnerable web server, embedded in benign background traffic. Because the
+original data-generation tooling (notably the B-Profile benign agent) is not
+publicly available, exact reproduction is not possible; however, the topology,
+attack scenarios, capture method and feature format are well documented and can
+be faithfully recreated. This work recreates the Thursday-morning scenario in a
+controlled CyberRange, documents every implementation choice, and quantifies the
+similarity between our dataset and the original.
+
+% =====================================================================
+\section{Testbed Topology and IP Plan}
+Following the CIC design, the testbed is partitioned into two isolated networks
+joined by a firewall: an \emph{Attack-Network} (\texttt{205.174.165.0/24}) hosting
+the attacker, and a \emph{Victim-Network} (\texttt{192.168.10.0/24}) hosting the
+victim web server, supporting servers and client workstations. A SPAN (mirror)
+port on the victim-network switch duplicates all traffic to a dedicated capture
+host. Table~\ref{tab:hosts} lists every host and its address.
+
+\begin{table}[h]
+\centering
+\caption{Complete host inventory and IP addressing used in the experiment.}
+\label{tab:hosts}
+\begin{tabular}{@{}llll@{}}
+\toprule
+Network & Host & IP address & Role in this experiment \\
+\midrule
+Attack  & Kali (\texttt{attacker-73})   & 205.174.165.73 & Attacker (sole attacker used) \\
+Attack  & \texttt{attacker-69/70/71}    & 205.174.165.69/70/71 & Present but unused on Thursday \\
+\midrule
+Victim  & Web server (DVWA)             & 192.168.10.50 & Victim web application \\
+        & \quad public address (NAT)    & 205.174.165.68 & Public IP of the victim \\
+Victim  & Services hub (\texttt{ubuntu12-server}) & 192.168.10.51 & Benign services (HTTP/FTP/SSH/DNS) \\
+Victim  & \texttt{dc-dns}               & 192.168.10.3  & Original DNS host (non-functional) \\
+Victim  & \texttt{client-17}            & 192.168.10.17 & Benign client (Linux) \\
+Victim  & \texttt{client-19}            & 192.168.10.19 & Benign client (Linux) \\
+Victim  & \texttt{client-25}            & 192.168.10.25 & Benign client (Linux) \\
+Victim  & \texttt{client-05}            & 192.168.10.5  & Benign client (Windows) \\
+Victim  & \texttt{client-08}            & 192.168.10.8  & Benign client (Windows) \\
+Victim  & \texttt{client-09}            & 192.168.10.9  & Benign client (Windows) \\
+Victim  & \texttt{client-14}            & 192.168.10.14 & Benign client (Windows) \\
+Victim  & \texttt{client-15}            & 192.168.10.15 & Benign client (Windows) \\
+Victim  & \texttt{client-12}            & 192.168.10.12 & Excluded (in use by a colleague) \\
+Victim  & Capture host                  & 192.168.10.200 & SPAN capture (passive) \\
+\midrule
+Gateway & Firewall (victim side)        & 192.168.10.1   & LAN interface of the pfSense firewall \\
+Gateway & Firewall (attack side)        & 205.174.165.80 & WAN interface of the pfSense firewall \\
+Gateway & Internet gateway              & 192.168.10.4   & Used only during setup/software install \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Correspondence with the original CIC addressing}
+The victim web server is deliberately placed at \texttt{192.168.10.50} and
+published through the public address \texttt{205.174.165.68}, exactly matching the
+CIC-IDS2017 victim web server. The attacker is a Kali host at
+\texttt{205.174.165.73}, again matching CIC. The benign client IPs
+(\texttt{.5, .8, .9, .12, .14, .15, .17, .19, .25}) correspond to the CIC client
+set. Two hosts in the original testbed could not be used here: the dedicated DNS
+server (\texttt{.3}) was non-functional in our environment, and one client
+(\texttt{.12}) was reserved by a colleague; these are treated as documented
+deviations (Section~\ref{sec:dev}).
+
+% =====================================================================
+\section{Why the Victim and the Services Hub Are Separate}
+A key design decision is that benign traffic is never directed at the victim.
+The victim (\texttt{192.168.10.50}) runs the Damn Vulnerable Web Application
+(DVWA) and is targeted \emph{only} by the attacker. All benign user activity is
+instead directed at a separate services hub (\texttt{192.168.10.51}) that runs
+HTTP, FTP, SSH and DNS. This separation ensures that every flow arriving at the
+victim on port~80 is malicious, which yields clean, unambiguous ground truth for
+labelling. In our capture, of all benign flows, $22{,}899$ are directed to the
+hub, whereas the victim receives only attacker traffic. The original CIC testbed
+uses the same principle: benign traffic is served by internal servers while the
+attacks are aimed at the web victim, and a switch mirror captures both.
+
+% =====================================================================
+\section{Software Deployed on Each Host}
+
+\subsection{Victim web server (\texttt{192.168.10.50})}
+The victim runs DVWA on Apache with a MariaDB backend:
+\begin{lstlisting}
+sudo apt install -y apache2 mariadb-server php php-mysqli php-gd libapache2-mod-php git
+cd /var/www/html
+sudo git clone https://github.com/digininja/DVWA.git dvwa
+sudo cp dvwa/config/config.inc.php.dist dvwa/config/config.inc.php
+sudo mysql -e "CREATE DATABASE dvwa; \
+  CREATE USER 'dvwa'@'localhost' IDENTIFIED BY 'p@ssw0rd'; \
+  GRANT ALL PRIVILEGES ON dvwa.* TO 'dvwa'@'localhost'; FLUSH PRIVILEGES;"
+sudo systemctl restart apache2
+\end{lstlisting}
+DVWA is initialised through \texttt{http://192.168.10.50/dvwa/setup.php} and its
+security level is set to \emph{Low}. The address \texttt{192.168.10.50} is added
+as an interface alias so the victim matches the CIC IP while preserving the
+host's original address.
+
+\subsection{Benign services hub (\texttt{192.168.10.51})}
+The hub provides the benign application protocols:
+\begin{lstlisting}
+sudo apt install -y apache2 vsftpd openssh-server bind9 bind9utils
+sudo useradd -m benign
+echo 'benign:benign123' | sudo chpasswd
+echo "benign test page" | sudo tee /var/www/html/index.html
+\end{lstlisting}
+After installation the hub listens on HTTP~(80), FTP~(21), SSH~(22) and DNS~(53).
+
+\subsection{Attacker (\texttt{205.174.165.73})}
+The Kali host already provides \texttt{patator}, \texttt{sqlmap}, \texttt{curl}
+and \texttt{python3}. A small brute-force wordlist is placed at
+\texttt{/tmp/pw.txt}.
+
+% =====================================================================
+\section{Traffic-Generation and Capture Scripts}
+Scripts are transferred to each host with the CyberRange file-upload facility
+(destination \texttt{/root} on Linux hosts, \texttt{C:\textbackslash} on Windows)
+and executed locally. Table~\ref{tab:scripts} summarises them.
+
+\begin{table}[h]
+\centering
+\caption{Scripts, their target hosts and their function.}
+\label{tab:scripts}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Script & Host(s) & Function \\
+\midrule
+\texttt{benign\_linux.sh}    & \texttt{.17, .19, .25}          & multi-user HTTP/FTP/SSH/DNS to the hub \\
+\texttt{benign\_windows.ps1} & \texttt{.5, .8, .9, .14, .15}   & multi-user HTTP/DNS to the hub \\
+\texttt{attack.sh}           & Kali (\texttt{.73})            & timed Brute Force, XSS, SQL Injection \\
+\texttt{capture.sh}          & Capture host (\texttt{.200})   & \texttt{tcpdump} on the SPAN interface \\
+\texttt{label\_flows.py}     & Analysis workstation           & label flows by attacker IP + time window \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Benign generators: \texttt{benign\_linux.sh} and \texttt{benign\_windows.ps1}}
+Each client runs three concurrent simulated users; with eight machines this
+yields approximately twenty-four users, comparable to the twenty-five users
+modelled by CIC's B-Profile. Each simulated user repeatedly performs a randomly
+chosen action---an HTTP request (including GET, POST, form submission and
+session cookies), an FTP download, an SSH login, or a DNS query---directed at the
+services hub \texttt{192.168.10.51}, pausing a random one-to-eight seconds
+between actions to emulate human interaction. The Windows version reproduces the
+same behaviour in PowerShell. Because CIC's B-Profile tool is not public, this
+generator is a behavioural substitute rather than the original agent.
+
+\subsection{Attack orchestration: \texttt{attack.sh}}
+Executed on the Kali host, this script first authenticates to DVWA and sets its
+security level to \emph{Low}. It then performs the three web attacks in the CIC
+order against the victim's public address \texttt{205.174.165.68} (translated by
+the firewall to \texttt{192.168.10.50}):
+\begin{enumerate}
+  \item \textbf{Web Brute Force} using \texttt{patator} against the login form,
+        iterating over the wordlist in \texttt{/tmp/pw.txt};
+  \item \textbf{Cross-Site Scripting (XSS)} by submitting reflected and stored
+        script payloads to the DVWA XSS endpoints;
+  \item \textbf{SQL Injection} using \texttt{sqlmap} against the DVWA SQLi
+        endpoint.
+\end{enumerate}
+The attacks are separated by short idle gaps, and the precise start and stop time
+of each phase is written to \texttt{/tmp/attack\_windows.log} for use during
+labelling. A representative brute-force invocation is:
+\begin{lstlisting}
+patator http_fuzz \
+  url="http://205.174.165.68/dvwa/vulnerabilities/brute/?username=admin&password=FILE0&Login=Login" \
+  method=GET 0=/tmp/pw.txt \
+  header="Cookie: PHPSESSID=<session>; security=low" \
+  -x ignore:fgrep='incorrect'
+\end{lstlisting}
+
+\subsection{Capture: \texttt{capture.sh}}
+On the capture host, \texttt{tcpdump} records all mirrored traffic on the SPAN
+interface into a single packet capture:
+\begin{lstlisting}
+sudo tcpdump -i enp9s0 -s 0 -w thursday_morning.pcap
+\end{lstlisting}
+
+\subsection{Labelling: \texttt{label\_flows.py}}
+Offline, the packet capture is converted to bidirectional flows with a
+CICFlowMeter-compatible feature extractor, and each flow is labelled from the
+attack-window log: a flow involving the attacker \texttt{205.174.165.73} during a
+recorded attack interval receives that attack's label, and all other flows are
+labelled \texttt{BENIGN}. Flow direction follows the CIC convention, i.e.\ the
+connection initiator (the attacker) is the source and the contacted service (the
+victim on port~80) is the destination.
+
+% =====================================================================
+\section{How Separate Streams Become One Labelled Dataset}
+The attack and benign streams travel to different destinations
+(attacker$\rightarrow$\texttt{.50}, benign$\rightarrow$\texttt{.51}) and do not
+interact at any host. They are combined only at the switch, whose mirror port
+copies every packet---both streams---into a single capture on the capture host.
+Mixing therefore occurs at the observation point, not at any end host. After
+capture, the single file is separated back into classes during labelling using
+the attacker's IP address and the recorded attack time-windows. This mirrors the
+original CIC method, in which a switch mirror port ``completely captured all send
+and receive traffic to the network.''
+
+\subsection{Collection procedure}
+\begin{enumerate}
+  \item Synchronise all host clocks (NTP)---required for correct time-window
+        labelling.
+  \item Start the capture on the capture host.
+  \item Start the benign generators on all clients (60-minute duration).
+  \item Start the attack orchestration on the Kali host.
+  \item After approximately one hour, stop the capture and retain the
+        attack-window log.
+  \item Extract flow features and apply labels offline.
+\end{enumerate}
+
+% =====================================================================
+\section{Resulting Dataset}
+The capture spans approximately 88 minutes ($165{,}703$ packets) and yields
+$28{,}344$ bidirectional flows described by 68 numeric features, using the CIC
+column naming. A \emph{bidirectional} flow aggregates both directions of a
+conversation---forward (client to server) and backward (server to client)---which
+is why the features occur in matched forward/backward pairs. Benign flows
+originate predominantly from the Linux clients \texttt{.17}, \texttt{.19} and
+\texttt{.25}, with the services hub \texttt{.51} appearing as the server that
+replies; attack flows originate from the Kali host \texttt{.73} toward the victim
+\texttt{.50}.
+
+% =====================================================================
+\section{Comparison with CIC-IDS2017}
+
+\subsection{Overall structure and labels}
+\begin{table}[h]
+\centering
+\caption{Dataset structure and label distribution: original CIC vs.\ ours.}
+\label{tab:labels}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+ & CIC & Ours \\
+\midrule
+Flows (rows)                 & 458{,}968 & 28{,}344 \\
+Columns                      & 85 & 70 \\
+Shared feature names         & \multicolumn{2}{c}{70} \\
+Blank/unlabelled rows        & 288{,}602 & 0 \\
+\midrule
+BENIGN                       & 168{,}186 & 26{,}322 \\
+Web Attack -- Brute Force    & 1{,}507   & 12$^{\dagger}$ \\
+Web Attack -- XSS            & 652       & 1{,}290 \\
+Web Attack -- SQL Injection  & 21        & 720 \\
+\bottomrule
+\end{tabular}
+\end{table}
+\noindent$^{\dagger}$ The low Brute-Force \emph{flow} count is an aggregation
+effect: \texttt{patator} uses HTTP keep-alive, so many login attempts share a
+small number of TCP connections. Counting distinct attacker connections instead
+gives approximately 808 brute-force, 774 XSS and 4--11 SQL-injection connections,
+which reproduces CIC's relative ordering (Brute~Force~$\gg$~XSS~$\gg$~SQLi). We
+also note that the original CIC file contains $288{,}602$ blank-label rows,
+whereas our dataset is fully labelled.
+
+\subsection{Attack endpoints}
+\begin{table}[h]
+\centering
+\caption{Web-attack flow endpoints (all flows use destination port 80/TCP).}
+\label{tab:endpoints}
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & CIC & Ours \\
+\midrule
+Attacker IP (source) & 172.16.0.1 & 205.174.165.73 \\
+Victim IP (destination) & 192.168.10.50 & 192.168.10.50 \\
+Destination port / protocol & 80 / TCP & 80 / TCP \\
+\bottomrule
+\end{tabular}
+\end{table}
+In both datasets the attacker is the flow source and the victim web server is the
+destination on port~80. The single systematic difference is the attacker's
+recorded address, discussed next.
+
+\subsection{Why some addresses differ}
+\label{sec:addrdiff}
+The victim web server matches CIC exactly (private \texttt{192.168.10.50}, public
+\texttt{205.174.165.68}), because we deliberately assigned these addresses. The
+attacker's \emph{recorded} address differs: CIC's Fortinet firewall applied
+source network address translation, so the attacker appears in their capture as
+the firewall's internal interface \texttt{172.16.0.1}; our pfSense firewall does
+not source-translate the attacker, so it appears as its true Kali address
+\texttt{205.174.165.73}. This is a property of the firewall configuration, not of
+the attack itself, and does not affect the attack's flow characteristics. Two
+supporting hosts also differ: the CIC DNS server (\texttt{.3}) was non-functional
+in our environment, so DNS was provided by the services hub \texttt{.51}; and one
+client (\texttt{.12}) was reserved by a colleague and therefore excluded. These
+substitutions change which hosts source the benign traffic but preserve the
+overall structure.
+
+\subsection{Feature set and constant features}
+Both datasets use CICFlowMeter-style bidirectional flow features; all 70 of our
+column names appear in the original CIC file. Our extractor emits 68 numeric
+features, a subset of CIC's full set (CIC additionally includes a small number of
+rarely used features). Certain features are constant-zero in both datasets
+because the underlying TCP events do not occur in web traffic: our dataset has
+one such column (\texttt{URG Flag Count}), while the original CIC file has ten
+(including \texttt{Bwd PSH Flags}, the forward/backward URG-flag counts, the
+CWE-flag count and the six bulk-rate features). Constant features carry no
+information and are routinely removed during machine-learning preprocessing.
+
+\subsection{Statistical comparison of benign flows}
+\begin{table}[h]
+\centering
+\caption{Mean of selected features over BENIGN flows.}
+\label{tab:benignstats}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Feature & CIC (mean) & Ours (mean) \\
+\midrule
+Flow Duration ($\mu$s)   & 12{,}540{,}399 & 88{,}543 \\
+Total Fwd Packets        & 15.18 & 2.90 \\
+Total Backward Packets   & 18.19 & 1.83 \\
+Flow Bytes/s             & 1{,}810{,}402 & 349{,}444 \\
+Fwd Packet Length Mean   & 48.67 & 14.15 \\
+Bwd Packet Length Mean   & 161.58 & 216.67 \\
+ACK Flag Count           & 0.28 & 4.10 \\
+\bottomrule
+\end{tabular}
+\end{table}
+The benign distributions differ in shape. CIC's benign profile comprises
+twenty-five users over five protocols, including long-lived HTTPS and e-mail
+sessions, producing fewer but longer and heavier flows. Our generator issues
+many short HTTP, FTP, SSH and DNS requests to an internal hub, producing shorter
+flows with fewer packets and lower per-flow duration. Both are legitimate benign
+traffic; the difference reflects the different user-behaviour models and protocol
+mixes rather than any error.
+
+\subsection{Statistical comparison of attack flows}
+\begin{table}[h]
+\centering
+\caption{Mean of selected features over attack flows.}
+\label{tab:attackstats}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Feature & Class & CIC (mean) & Ours (mean) \\
+\midrule
+Total Fwd Packets   & Brute Force & 12.37 & 2.33 \\
+Bwd Packet Len Mean & Brute Force & 41.62 & 231.83 \\
+Total Fwd Packets   & XSS         & 7.90 & 11.90 \\
+PSH Flag Count      & XSS         & 0.96 & 10.25 \\
+Total Fwd Packets   & SQL Inj.    & 3.05 & 11.91 \\
+Bwd Packet Len Mean & SQL Inj.    & 327.18 & 1{,}349.83 \\
+\bottomrule
+\end{tabular}
+\end{table}
+The three attack types are present and correctly labelled in both datasets, and
+their relative ordering matches. Absolute feature values differ for three
+reasons: the attack tooling is not identical (we use \texttt{patator} and
+\texttt{sqlmap}, whereas CIC automated the browser with Selenium); flow
+aggregation differs (keep-alive connections group attempts differently); and our
+DVWA instance returns different-sized responses (for example, \texttt{sqlmap}
+elicits larger database responses, raising the backward packet length for SQL
+injection). These differences affect magnitudes, not the identity or ordering of
+the attacks.
+
+\subsection{Summary of closeness and differences}
+Our dataset is close to the reference in the aspects that define the scenario:
+identical victim addressing and port, the same three web attacks executed in the
+same order with the same relative volumes, the same bidirectional flow-feature
+format with matching column names, and the same mirror-based capture method. It
+differs from the reference in aspects that could not be replicated exactly: the
+benign generator is a behavioural substitute for the private B-Profile agent
+(covering four of the five original protocols); the attacker's recorded IP
+reflects a different firewall NAT policy; two supporting hosts were substituted
+or excluded; the run is one hour rather than a full morning; and absolute feature
+magnitudes differ because of tooling and content differences. None of these
+affects the validity of the dataset for intrusion-detection experimentation, and
+all are documented below.
+
+% =====================================================================
+\section{Documented Deviations from the Original}
+\label{sec:dev}
+\begin{enumerate}
+  \item \textbf{Benign generator.} CIC's B-Profile agent is not publicly
+        available; we implemented an equivalent behavioural generator. E-mail
+        (SMTP/IMAP) and HTTPS were not provided, so four of the five original
+        protocols (HTTP, FTP, SSH, DNS) are covered.
+  \item \textbf{Attacker address.} Recorded as \texttt{205.174.165.73} because
+        our firewall does not source-translate the attacker, whereas CIC's
+        Fortinet firewall produced \texttt{172.16.0.1}. The victim address
+        matches CIC.
+  \item \textbf{Substituted/excluded hosts.} The original DNS host (\texttt{.3})
+        was non-functional, so DNS was consolidated on the services hub
+        (\texttt{.51}); one client (\texttt{.12}) was reserved by a colleague and
+        excluded.
+  \item \textbf{Scale and duration.} Approximately twenty-four users on eight
+        machines and a one-hour run, versus twenty-five users and an
+        approximately four-hour morning in the original; the attack order, gaps
+        and relative volumes were preserved.
+  \item \textbf{Client operating systems.} Host \texttt{.25} runs Linux (the
+        original used macOS); as flows are keyed by IP, this does not affect the
+        flow features.
+  \item \textbf{Feature extractor.} A CICFlowMeter-compatible extractor was used;
+        the brute-force flow count differs from the original owing to keep-alive
+        aggregation, as discussed in Section~\ref{tab:labels}.
+\end{enumerate}
+
+\begin{thebibliography}{9}
+\bibitem{sharafaldin2018} I.~Sharafaldin, A.~H.~Lashkari, and A.~A.~Ghorbani,
+``Toward Generating a New Intrusion Detection Dataset and Intrusion Traffic
+Characterization,'' in \emph{Proc. 4th International Conference on Information
+Systems Security and Privacy (ICISSP)}, 2018, pp.~108--116.
+\end{thebibliography}
+
+\end{document}
